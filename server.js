@@ -12,27 +12,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret';
 const STORAGE_DIR = path.join(__dirname, 'server-storage');
 const DATA_FILE = path.join(STORAGE_DIR, 'data.json');
 
-// ──────────────────────────────────────────
-// CORS — replace YOUR_NETLIFY_URL with your
-// actual Netlify site URL after you deploy
-// ──────────────────────────────────────────
-const ALLOWED_ORIGINS = [
-    'https://YOUR_NETLIFY_URL.netlify.app',
-    'http://localhost:3000',
-    'http://localhost:5500',
-    'http://127.0.0.1:5500'
-];
-
-app.use(cors({
-    origin: function (origin, callback) {
-        if (!origin || ALLOWED_ORIGINS.includes(origin)) {
-            callback(null, true);
-        } else {
-            callback(new Error('Not allowed by CORS'));
-        }
-    },
-    credentials: true
-}));
+// Allow ALL origins — safe for a public e-commerce site
+app.use(cors());
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
