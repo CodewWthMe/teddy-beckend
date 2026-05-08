@@ -17,7 +17,7 @@ const DATA_FILE = path.join(STORAGE_DIR, 'data.json');
 // actual Netlify site URL after you deploy
 // ──────────────────────────────────────────
 const ALLOWED_ORIGINS = [
-    'https://mecramecurled.netlify.app/',
+    'https://YOUR_NETLIFY_URL.netlify.app',
     'http://localhost:3000',
     'http://localhost:5500',
     'http://127.0.0.1:5500'
@@ -83,18 +83,23 @@ const DEFAULT_SETTINGS = {
 // STORAGE HELPERS
 // ──────────────────────────────────────────
 
-function ensureStorage() {
+function ensureDir() {
     if (!fs.existsSync(STORAGE_DIR)) {
         fs.mkdirSync(STORAGE_DIR, { recursive: true });
     }
+}
+
+function ensureStorage() {
+    ensureDir();
     if (!fs.existsSync(DATA_FILE)) {
-        writeData({
+        const defaultData = {
             products: DEFAULT_PRODUCTS,
             productTypes: DEFAULT_TYPES,
             settings: DEFAULT_SETTINGS,
             orders: [],
             adminPasswordHash: null
-        });
+        };
+        fs.writeFileSync(DATA_FILE, JSON.stringify(defaultData, null, 2));
     }
 }
 
@@ -114,7 +119,7 @@ function readData() {
 }
 
 function writeData(data) {
-    ensureStorage();
+    ensureDir();
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
