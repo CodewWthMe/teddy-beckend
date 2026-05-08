@@ -1,7 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
@@ -9,100 +7,49 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret';
 
-const STORAGE_DIR = path.join(__dirname, 'server-storage');
-const DATA_FILE = path.join(STORAGE_DIR, 'data.json');
-
-// Allow ALL origins — safe for a public e-commerce site
 app.use(cors());
-
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // ──────────────────────────────────────────
-// DEFAULT DATA
+// IN-MEMORY DATA STORE
+// No file system — works perfectly on Render free tier
+// Note: data resets when Render restarts the service
 // ──────────────────────────────────────────
 
-const DEFAULT_PRODUCTS = [
-    {
-        id: 1,
-        name: 'Macrame Wall Hanging',
-        description: 'Beautiful handmade macrame wall hanging',
-        price: 599,
-        discount: 10,
-        type: 'Wall Hanging',
-        featured: true,
-        images: ['https://images.unsplash.com/photo-1586023492125-27b2c045efd7?w=600'],
-        video: null
+const db = {
+    products: [
+        {
+            id: 1,
+            name: 'Macrame Wall Hanging',
+            description: 'Beautiful handmade macrame wall hanging',
+            price: 599,
+            discount: 10,
+            type: 'Wall Hanging',
+            featured: true,
+            images: ['https://images.unsplash.com/photo-1586023492125-27b2c045efd7?w=600'],
+            video: null
+        },
+        {
+            id: 2,
+            name: 'Macrame Plant Hanger',
+            description: 'Stylish plant hanger for your home',
+            price: 399,
+            discount: 0,
+            type: 'Plant Hanger',
+            featured: true,
+            images: ['https://images.unsplash.com/photo-1592150621744-aca64f48394a?w=600'],
+            video: null
+        }
+    ],
+    productTypes: ['Wall Hanging', 'Plant Hanger', 'Table Runner', 'Bag', 'Keychain'],
+    settings: {
+        businessEmail: 'curledmacrame@gmail.com',
+        businessWhatsApp: '+917415036637'
     },
-    {
-        id: 2,
-        name: 'Macrame Plant Hanger',
-        description: 'Stylish plant hanger for your home',
-        price: 399,
-        discount: 0,
-        type: 'Plant Hanger',
-        featured: true,
-        images: ['https://images.unsplash.com/photo-1592150621744-aca64f48394a?w=600'],
-        video: null
-    }
-];
-
-const DEFAULT_TYPES = [
-    'Wall Hanging',
-    'Plant Hanger',
-    'Table Runner',
-    'Bag',
-    'Keychain'
-];
-
-const DEFAULT_SETTINGS = {
-    businessEmail: 'curledmacrame@gmail.com',
-    businessWhatsApp: '+917415036637'
+    orders: [],
+    adminPasswordHash: null
 };
-
-// ──────────────────────────────────────────
-// STORAGE HELPERS
-// ──────────────────────────────────────────
-
-function ensureDir() {
-    if (!fs.existsSync(STORAGE_DIR)) {
-        fs.mkdirSync(STORAGE_DIR, { recursive: true });
-    }
-}
-
-function ensureStorage() {
-    ensureDir();
-    if (!fs.existsSync(DATA_FILE)) {
-        const defaultData = {
-            products: DEFAULT_PRODUCTS,
-            productTypes: DEFAULT_TYPES,
-            settings: DEFAULT_SETTINGS,
-            orders: [],
-            adminPasswordHash: null
-        };
-        fs.writeFileSync(DATA_FILE, JSON.stringify(defaultData, null, 2));
-    }
-}
-
-function readData() {
-    ensureStorage();
-    try {
-        return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    } catch {
-        return {
-            products: DEFAULT_PRODUCTS,
-            productTypes: DEFAULT_TYPES,
-            settings: DEFAULT_SETTINGS,
-            orders: [],
-            adminPasswordHash: null
-        };
-    }
-}
-
-function writeData(data) {
-    ensureDir();
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-}
 
 // ──────────────────────────────────────────
 // JWT MIDDLEWARE
@@ -122,30 +69,43 @@ function requireAdmin(req, res, next) {
 }
 
 // ──────────────────────────────────────────
+// ROUTES: HEALTH
+// ──────────────────────────────────────────
+
+app.get('/', (req, res) => {
+    res.json({ message: 'Curled Macrame API is running', status: 'ok' });
+});
+
+app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', time: new Date().toISOString() });
+});
+
+// ──────────────────────────────────────────
 // ROUTES: ADMIN AUTH
 // ──────────────────────────────────────────
 
 app.post('/api/admin/login', (req, res) => {
-    const { passwordHash } = req.body;
-    if (!passwordHash) {
-        return res.status(400).json({ error: 'Password required' });
+    try {
+        const { passwordHash } = req.body;
+        if (!passwordHash) {
+            return res.status(400).json({ error: 'Password required' });
+        }
+
+        if (!db.adminPasswordHash) {
+            db.adminPasswordHash = passwordHash;
+            const token = jwt.sign({ admin: true }, JWT_SECRET, { expiresIn: '7d' });
+            return res.json({ token, firstTime: true, message: 'Password created' });
+        }
+
+        if (db.adminPasswordHash === passwordHash) {
+            const token = jwt.sign({ admin: true }, JWT_SECRET, { expiresIn: '7d' });
+            return res.json({ token });
+        }
+
+        res.status(401).json({ error: 'Wrong password' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-
-    const data = readData();
-
-    if (!data.adminPasswordHash) {
-        data.adminPasswordHash = passwordHash;
-        writeData(data);
-        const token = jwt.sign({ admin: true }, JWT_SECRET, { expiresIn: '7d' });
-        return res.json({ token, firstTime: true, message: 'Password created' });
-    }
-
-    if (data.adminPasswordHash === passwordHash) {
-        const token = jwt.sign({ admin: true }, JWT_SECRET, { expiresIn: '7d' });
-        return res.json({ token });
-    }
-
-    res.status(401).json({ error: 'Wrong password' });
 });
 
 // ──────────────────────────────────────────
@@ -153,33 +113,38 @@ app.post('/api/admin/login', (req, res) => {
 // ──────────────────────────────────────────
 
 app.get('/api/products', (req, res) => {
-    const data = readData();
-    res.json(data.products);
+    res.json(db.products);
 });
 
 app.post('/api/products', requireAdmin, (req, res) => {
-    const data = readData();
-    const product = req.body;
-    product.id = Math.max(...data.products.map(p => p.id), 0) + 1;
-    data.products.push(product);
-    writeData(data);
-    res.json(product);
+    try {
+        const product = req.body;
+        product.id = Math.max(...db.products.map(p => p.id), 0) + 1;
+        db.products.push(product);
+        res.json(product);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.put('/api/products/:id', requireAdmin, (req, res) => {
-    const data = readData();
-    const idx = data.products.findIndex(p => p.id === parseInt(req.params.id));
-    if (idx === -1) return res.status(404).json({ error: 'Product not found' });
-    data.products[idx] = { ...data.products[idx], ...req.body };
-    writeData(data);
-    res.json(data.products[idx]);
+    try {
+        const idx = db.products.findIndex(p => p.id === parseInt(req.params.id));
+        if (idx === -1) return res.status(404).json({ error: 'Product not found' });
+        db.products[idx] = { ...db.products[idx], ...req.body };
+        res.json(db.products[idx]);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.delete('/api/products/:id', requireAdmin, (req, res) => {
-    const data = readData();
-    data.products = data.products.filter(p => p.id !== parseInt(req.params.id));
-    writeData(data);
-    res.json({ success: true });
+    try {
+        db.products = db.products.filter(p => p.id !== parseInt(req.params.id));
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ──────────────────────────────────────────
@@ -187,27 +152,30 @@ app.delete('/api/products/:id', requireAdmin, (req, res) => {
 // ──────────────────────────────────────────
 
 app.get('/api/product-types', (req, res) => {
-    const data = readData();
-    res.json(data.productTypes);
+    res.json(db.productTypes);
 });
 
 app.post('/api/product-types', requireAdmin, (req, res) => {
-    const data = readData();
-    const { name } = req.body;
-    if (!name) return res.status(400).json({ error: 'Name required' });
-    if (data.productTypes.includes(name)) {
-        return res.status(400).json({ error: 'Type already exists' });
+    try {
+        const { name } = req.body;
+        if (!name) return res.status(400).json({ error: 'Name required' });
+        if (db.productTypes.includes(name)) {
+            return res.status(400).json({ error: 'Type already exists' });
+        }
+        db.productTypes.push(name);
+        res.json(db.productTypes);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    data.productTypes.push(name);
-    writeData(data);
-    res.json(data.productTypes);
 });
 
 app.delete('/api/product-types/:name', requireAdmin, (req, res) => {
-    const data = readData();
-    data.productTypes = data.productTypes.filter(t => t !== req.params.name);
-    writeData(data);
-    res.json(data.productTypes);
+    try {
+        db.productTypes = db.productTypes.filter(t => t !== req.params.name);
+        res.json(db.productTypes);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ──────────────────────────────────────────
@@ -215,15 +183,16 @@ app.delete('/api/product-types/:name', requireAdmin, (req, res) => {
 // ──────────────────────────────────────────
 
 app.get('/api/settings', (req, res) => {
-    const data = readData();
-    res.json(data.settings);
+    res.json(db.settings);
 });
 
 app.post('/api/settings', requireAdmin, (req, res) => {
-    const data = readData();
-    data.settings = { ...data.settings, ...req.body };
-    writeData(data);
-    res.json(data.settings);
+    try {
+        db.settings = { ...db.settings, ...req.body };
+        res.json(db.settings);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ──────────────────────────────────────────
@@ -231,44 +200,38 @@ app.post('/api/settings', requireAdmin, (req, res) => {
 // ──────────────────────────────────────────
 
 app.get('/api/orders', requireAdmin, (req, res) => {
-    const data = readData();
-    res.json(data.orders);
+    res.json(db.orders);
 });
 
 app.post('/api/orders', (req, res) => {
-    const data = readData();
-    const order = {
-        ...req.body,
-        timestamp: Date.now(),
-        date: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
-    };
-    data.orders.unshift(order);
-    writeData(data);
-    res.json(order);
+    try {
+        const order = {
+            ...req.body,
+            timestamp: Date.now(),
+            date: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
+        };
+        db.orders.unshift(order);
+        res.json(order);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.delete('/api/orders/:timestamp', requireAdmin, (req, res) => {
-    const data = readData();
-    data.orders = data.orders.filter(
-        o => o.timestamp !== parseInt(req.params.timestamp)
-    );
-    writeData(data);
-    res.json({ success: true });
-});
-
-// ──────────────────────────────────────────
-// HEALTH CHECK
-// ──────────────────────────────────────────
-
-app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', time: new Date().toISOString() });
+    try {
+        db.orders = db.orders.filter(
+            o => o.timestamp !== parseInt(req.params.timestamp)
+        );
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ──────────────────────────────────────────
 // START
 // ──────────────────────────────────────────
 
-ensureStorage();
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log('Curled Macrame API running on port ' + PORT);
 });
