@@ -17,7 +17,7 @@ const DATA_FILE = path.join(STORAGE_DIR, 'data.json');
 // actual Netlify site URL after you deploy
 // ──────────────────────────────────────────
 const ALLOWED_ORIGINS = [
-    'https://YOUR_NETLIFY_URL.netlify.app',
+    'https://mecramecurled.netlify.app/',
     'http://localhost:3000',
     'http://localhost:5500',
     'http://127.0.0.1:5500'
