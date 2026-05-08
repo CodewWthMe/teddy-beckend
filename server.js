@@ -1,55 +1,144 @@
 const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret';
+const MONGODB_URI = process.env.MONGODB_URI || null;
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // ──────────────────────────────────────────
-// IN-MEMORY DATA STORE
-// No file system — works perfectly on Render free tier
-// Note: data resets when Render restarts the service
+// IN-MEMORY FALLBACK (used if no MONGODB_URI)
 // ──────────────────────────────────────────
 
-const db = {
+const mem = {
     products: [
-        {
-            id: 1,
-            name: 'Macrame Wall Hanging',
-            description: 'Beautiful handmade macrame wall hanging',
-            price: 599,
-            discount: 10,
-            type: 'Wall Hanging',
-            featured: true,
-            images: ['https://images.unsplash.com/photo-1586023492125-27b2c045efd7?w=600'],
-            video: null
-        },
-        {
-            id: 2,
-            name: 'Macrame Plant Hanger',
-            description: 'Stylish plant hanger for your home',
-            price: 399,
-            discount: 0,
-            type: 'Plant Hanger',
-            featured: true,
-            images: ['https://images.unsplash.com/photo-1592150621744-aca64f48394a?w=600'],
-            video: null
-        }
+        { id: 1, name: 'Macrame Wall Hanging', description: 'Beautiful handmade macrame', price: 599, discount: 10, type: 'Wall Hanging', featured: true, images: ['https://images.unsplash.com/photo-1586023492125-27b2c045efd7?w=600'], video: null },
+        { id: 2, name: 'Macrame Plant Hanger', description: 'Stylish plant hanger for your home', price: 399, discount: 0, type: 'Plant Hanger', featured: true, images: ['https://images.unsplash.com/photo-1592150621744-aca64f48394a?w=600'], video: null }
     ],
     productTypes: ['Wall Hanging', 'Plant Hanger', 'Table Runner', 'Bag', 'Keychain'],
-    settings: {
-        businessEmail: 'curledmacrame@gmail.com',
-        businessWhatsApp: '+917415036637'
-    },
+    settings: { businessEmail: 'curledmacrame@gmail.com', businessWhatsApp: '+917415036637' },
     orders: [],
     adminPasswordHash: null
 };
+
+// ──────────────────────────────────────────
+// MONGOOSE MODELS
+// ──────────────────────────────────────────
+
+const ProductSchema = new mongoose.Schema({
+    id: Number,
+    name: String,
+    description: String,
+    price: Number,
+    discount: { type: Number, default: 0 },
+    type: String,
+    featured: { type: Boolean, default: true },
+    images: [String],
+    video: { type: String, default: null }
+});
+
+const StoreSchema = new mongoose.Schema({
+    key: { type: String, unique: true },
+    value: mongoose.Schema.Types.Mixed
+});
+
+let Product, Store;
+let useDB = false;
+
+async function connectDB() {
+    if (!MONGODB_URI) {
+        console.log('No MONGODB_URI set — using in-memory storage');
+        return;
+    }
+    try {
+        await mongoose.connect(MONGODB_URI);
+        Product = mongoose.model('Product', ProductSchema);
+        Store = mongoose.model('Store', StoreSchema);
+        useDB = true;
+        console.log('Connected to MongoDB');
+
+        const count = await Product.countDocuments();
+        if (count === 0) {
+            await Product.insertMany(mem.products);
+            console.log('Seeded default products');
+        }
+        const types = await Store.findOne({ key: 'productTypes' });
+        if (!types) await Store.create({ key: 'productTypes', value: mem.productTypes });
+        const settings = await Store.findOne({ key: 'settings' });
+        if (!settings) await Store.create({ key: 'settings', value: mem.settings });
+        const admin = await Store.findOne({ key: 'adminPasswordHash' });
+        if (!admin) await Store.create({ key: 'adminPasswordHash', value: null });
+    } catch (err) {
+        console.error('MongoDB connection failed:', err.message);
+        console.log('Falling back to in-memory storage');
+    }
+}
+
+// ──────────────────────────────────────────
+// DATA HELPERS
+// ──────────────────────────────────────────
+
+async function getProducts() {
+    if (useDB) return await Product.find({}, '-_id -__v').lean();
+    return mem.products;
+}
+
+async function saveProduct(product) {
+    if (useDB) {
+        const p = new Product(product);
+        await p.save();
+        return product;
+    }
+    mem.products.push(product);
+    return product;
+}
+
+async function updateProduct(id, data) {
+    if (useDB) {
+        await Product.updateOne({ id }, { $set: data });
+        return await Product.findOne({ id }, '-_id -__v').lean();
+    }
+    const idx = mem.products.findIndex(p => p.id === id);
+    if (idx === -1) return null;
+    mem.products[idx] = { ...mem.products[idx], ...data };
+    return mem.products[idx];
+}
+
+async function deleteProduct(id) {
+    if (useDB) { await Product.deleteOne({ id }); return; }
+    mem.products = mem.products.filter(p => p.id !== id);
+}
+
+async function getNextProductId() {
+    if (useDB) {
+        const last = await Product.findOne({}).sort({ id: -1 }).lean();
+        return last ? last.id + 1 : 1;
+    }
+    return Math.max(...mem.products.map(p => p.id), 0) + 1;
+}
+
+async function getStoreValue(key) {
+    if (useDB) {
+        const doc = await Store.findOne({ key }).lean();
+        return doc ? doc.value : null;
+    }
+    return mem[key];
+}
+
+async function setStoreValue(key, value) {
+    if (useDB) {
+        await Store.updateOne({ key }, { $set: { value } }, { upsert: true });
+        return;
+    }
+    mem[key] = value;
+}
 
 // ──────────────────────────────────────────
 // JWT MIDDLEWARE
@@ -57,9 +146,7 @@ const db = {
 
 function requireAdmin(req, res, next) {
     const auth = req.headers.authorization;
-    if (!auth || !auth.startsWith('Bearer ')) {
-        return res.status(401).json({ error: 'Unauthorized' });
-    }
+    if (!auth || !auth.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
     try {
         jwt.verify(auth.slice(7), JWT_SECRET);
         next();
@@ -69,35 +156,32 @@ function requireAdmin(req, res, next) {
 }
 
 // ──────────────────────────────────────────
-// ROUTES: HEALTH
+// ROUTES
 // ──────────────────────────────────────────
 
 app.get('/', (req, res) => {
-    res.json({ message: 'Curled Macrame API is running', status: 'ok' });
+    res.json({ message: 'Curled Macrame API is running', status: 'ok', db: useDB ? 'mongodb' : 'memory' });
 });
 
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', time: new Date().toISOString() });
+    res.json({ status: 'ok', db: useDB ? 'mongodb' : 'memory', time: new Date().toISOString() });
 });
 
-// ──────────────────────────────────────────
-// ROUTES: ADMIN AUTH
-// ──────────────────────────────────────────
-
-app.post('/api/admin/login', (req, res) => {
+// Admin auth
+app.post('/api/admin/login', async (req, res) => {
     try {
         const { passwordHash } = req.body;
-        if (!passwordHash) {
-            return res.status(400).json({ error: 'Password required' });
-        }
+        if (!passwordHash) return res.status(400).json({ error: 'Password required' });
 
-        if (!db.adminPasswordHash) {
-            db.adminPasswordHash = passwordHash;
+        const stored = await getStoreValue('adminPasswordHash');
+
+        if (!stored) {
+            await setStoreValue('adminPasswordHash', passwordHash);
             const token = jwt.sign({ admin: true }, JWT_SECRET, { expiresIn: '7d' });
             return res.json({ token, firstTime: true, message: 'Password created' });
         }
 
-        if (db.adminPasswordHash === passwordHash) {
+        if (stored === passwordHash) {
             const token = jwt.sign({ admin: true }, JWT_SECRET, { expiresIn: '7d' });
             return res.json({ token });
         }
@@ -108,130 +192,105 @@ app.post('/api/admin/login', (req, res) => {
     }
 });
 
-// ──────────────────────────────────────────
-// ROUTES: PRODUCTS
-// ──────────────────────────────────────────
-
-app.get('/api/products', (req, res) => {
-    res.json(db.products);
+// Products
+app.get('/api/products', async (req, res) => {
+    try { res.json(await getProducts()); }
+    catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/products', requireAdmin, (req, res) => {
+app.post('/api/products', requireAdmin, async (req, res) => {
     try {
-        const product = req.body;
-        product.id = Math.max(...db.products.map(p => p.id), 0) + 1;
-        db.products.push(product);
-        res.json(product);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        const product = { ...req.body, id: await getNextProductId() };
+        res.json(await saveProduct(product));
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.put('/api/products/:id', requireAdmin, (req, res) => {
+app.put('/api/products/:id', requireAdmin, async (req, res) => {
     try {
-        const idx = db.products.findIndex(p => p.id === parseInt(req.params.id));
-        if (idx === -1) return res.status(404).json({ error: 'Product not found' });
-        db.products[idx] = { ...db.products[idx], ...req.body };
-        res.json(db.products[idx]);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        const updated = await updateProduct(parseInt(req.params.id), req.body);
+        if (!updated) return res.status(404).json({ error: 'Not found' });
+        res.json(updated);
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.delete('/api/products/:id', requireAdmin, (req, res) => {
+app.delete('/api/products/:id', requireAdmin, async (req, res) => {
     try {
-        db.products = db.products.filter(p => p.id !== parseInt(req.params.id));
+        await deleteProduct(parseInt(req.params.id));
         res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ──────────────────────────────────────────
-// ROUTES: PRODUCT TYPES
-// ──────────────────────────────────────────
-
-app.get('/api/product-types', (req, res) => {
-    res.json(db.productTypes);
+// Product types
+app.get('/api/product-types', async (req, res) => {
+    try { res.json(await getStoreValue('productTypes') || []); }
+    catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/product-types', requireAdmin, (req, res) => {
+app.post('/api/product-types', requireAdmin, async (req, res) => {
     try {
         const { name } = req.body;
         if (!name) return res.status(400).json({ error: 'Name required' });
-        if (db.productTypes.includes(name)) {
-            return res.status(400).json({ error: 'Type already exists' });
-        }
-        db.productTypes.push(name);
-        res.json(db.productTypes);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        const types = await getStoreValue('productTypes') || [];
+        if (types.includes(name)) return res.status(400).json({ error: 'Type already exists' });
+        types.push(name);
+        await setStoreValue('productTypes', types);
+        res.json(types);
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.delete('/api/product-types/:name', requireAdmin, (req, res) => {
+app.delete('/api/product-types/:name', requireAdmin, async (req, res) => {
     try {
-        db.productTypes = db.productTypes.filter(t => t !== req.params.name);
-        res.json(db.productTypes);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        const types = (await getStoreValue('productTypes') || []).filter(t => t !== req.params.name);
+        await setStoreValue('productTypes', types);
+        res.json(types);
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ──────────────────────────────────────────
-// ROUTES: SETTINGS
-// ──────────────────────────────────────────
-
-app.get('/api/settings', (req, res) => {
-    res.json(db.settings);
+// Settings
+app.get('/api/settings', async (req, res) => {
+    try { res.json(await getStoreValue('settings') || {}); }
+    catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/settings', requireAdmin, (req, res) => {
+app.post('/api/settings', requireAdmin, async (req, res) => {
     try {
-        db.settings = { ...db.settings, ...req.body };
-        res.json(db.settings);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        const current = await getStoreValue('settings') || {};
+        const updated = { ...current, ...req.body };
+        await setStoreValue('settings', updated);
+        res.json(updated);
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ──────────────────────────────────────────
-// ROUTES: ORDERS
-// ──────────────────────────────────────────
-
-app.get('/api/orders', requireAdmin, (req, res) => {
-    res.json(db.orders);
+// Orders
+app.get('/api/orders', requireAdmin, async (req, res) => {
+    try { res.json(await getStoreValue('orders') || []); }
+    catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/orders', (req, res) => {
+app.post('/api/orders', async (req, res) => {
     try {
-        const order = {
-            ...req.body,
-            timestamp: Date.now(),
-            date: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
-        };
-        db.orders.unshift(order);
+        const order = { ...req.body, timestamp: Date.now(), date: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) };
+        const orders = await getStoreValue('orders') || [];
+        orders.unshift(order);
+        await setStoreValue('orders', orders);
         res.json(order);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.delete('/api/orders/:timestamp', requireAdmin, (req, res) => {
+app.delete('/api/orders/:timestamp', requireAdmin, async (req, res) => {
     try {
-        db.orders = db.orders.filter(
-            o => o.timestamp !== parseInt(req.params.timestamp)
-        );
+        const orders = (await getStoreValue('orders') || []).filter(o => o.timestamp !== parseInt(req.params.timestamp));
+        await setStoreValue('orders', orders);
         res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ──────────────────────────────────────────
 // START
 // ──────────────────────────────────────────
 
-app.listen(PORT, () => {
-    console.log('Curled Macrame API running on port ' + PORT);
+connectDB().then(() => {
+    app.listen(PORT, () => {
+        console.log('Curled Macrame API running on port ' + PORT);
+    });
 });
