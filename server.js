@@ -433,7 +433,7 @@ async function startServer() {
         settings: {
             businessEmail:     'curledmacrame@gmail.com',
             businessWhatsApp:  '+917415036637',
-            paytmQrImage:      'paytm-qr.png'
+            paytmQrImage:      'Your-qr-image.png'
         },
         adminPasswordHash: null,
         orders:            []
@@ -443,6 +443,13 @@ async function startServer() {
         if (!await Store.findOne({ key })) {
             await Store.create({ key, value });
         }
+    }
+
+    // Fix QR image name in existing databases (old default was paytm-qr.png)
+    const existingSettings = await getStoreValue('settings');
+    if (existingSettings && existingSettings.paytmQrImage === 'paytm-qr.png') {
+        await setStoreValue('settings', { ...existingSettings, paytmQrImage: 'Your-qr-image.png' });
+        console.log('Updated QR image filename to Your-qr-image.png');
     }
 
     app.listen(PORT, () => {
