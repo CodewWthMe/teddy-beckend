@@ -3,6 +3,8 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const compression = require('compression');
+const multer = require('multer');
+const cloudinary = require('cloudinary').v2;
 require('dotenv').config();
 
 const app = express();
@@ -10,25 +12,33 @@ const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret';
 const MONGODB_URI = process.env.MONGODB_URI || null;
 
-// Gzip all responses
-app.use(compression());
+// Configure Cloudinary
+const CLOUDINARY_CONFIGURED = !!(
+    process.env.CLOUDINARY_CLOUD_NAME &&
+    process.env.CLOUDINARY_API_KEY &&
+    process.env.CLOUDINARY_API_SECRET
+);
+if (CLOUDINARY_CONFIGURED) {
+    cloudinary.config({
+        cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+        api_key: process.env.CLOUDINARY_API_KEY,
+        api_secret: process.env.CLOUDINARY_API_SECRET
+    });
+    console.log('Cloudinary configured');
+} else {
+    console.log('Cloudinary not configured — image upload will use URLs only');
+}
 
-app.use(cors({
-    origin: '*',
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
-}));
+app.use(compression());
+app.use(cors({ origin: '*', methods: ['GET','POST','PUT','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization'] }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // ──────────────────────────────────────────
-// IN-MEMORY FALLBACK
+// IN-MEMORY FALLBACK (only if MongoDB unavailable)
 // ──────────────────────────────────────────
 const mem = {
-    products: [
-        { id: 1, name: 'Macrame Wall Hanging', description: 'Beautiful handmade macrame wall art', price: 599, discount: 10, type: 'Wall Hanging', featured: true, stock: 10, images: ['https://images.unsplash.com/photo-1586023492125-27b2c045efd7?w=600'], video: null },
-        { id: 2, name: 'Macrame Plant Hanger', description: 'Stylish plant hanger for your home', price: 399, discount: 0, type: 'Plant Hanger', featured: true, stock: 15, images: ['https://images.unsplash.com/photo-1592150621744-aca64f48394a?w=600'], video: null }
-    ],
+    products: [],
     productTypes: ['Wall Hanging', 'Plant Hanger', 'Table Runner', 'Bag', 'Keychain'],
     settings: { businessEmail: 'curledmacrame@gmail.com', businessWhatsApp: '+917415036637' },
     orders: [],
@@ -40,16 +50,16 @@ const mem = {
 // ──────────────────────────────────────────
 const ProductSchema = new mongoose.Schema({
     id: { type: Number, index: true },
-    name: String,
+    name: { type: String, required: true },
     description: String,
-    price: Number,
+    price: { type: Number, required: true },
     discount: { type: Number, default: 0 },
     type: String,
     featured: { type: Boolean, default: true },
     stock: { type: Number, default: 99 },
-    images: [String],
+    images: [String],   // Cloudinary URLs (not base64)
     video: { type: String, default: null }
-});
+}, { timestamps: true });
 
 const StoreSchema = new mongoose.Schema({
     key: { type: String, unique: true },
@@ -60,20 +70,32 @@ let Product, Store;
 let useDB = false;
 
 async function connectDB() {
-    if (!MONGODB_URI) { console.log('No MONGODB_URI — using in-memory'); return; }
+    if (!MONGODB_URI) {
+        console.warn('⚠️  MONGODB_URI not set — products will be lost on restart! Add it to Render environment variables.');
+        return;
+    }
     try {
-        await mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 5000 });
+        await mongoose.connect(MONGODB_URI, {
+            serverSelectionTimeoutMS: 10000,
+            socketTimeoutMS: 45000
+        });
         Product = mongoose.model('Product', ProductSchema);
         Store = mongoose.model('Store', StoreSchema);
         useDB = true;
-        console.log('Connected to MongoDB');
-        if (await Product.countDocuments() === 0) { await Product.insertMany(mem.products); console.log('Seeded products'); }
-        if (!await Store.findOne({ key: 'productTypes' })) await Store.create({ key: 'productTypes', value: mem.productTypes });
-        if (!await Store.findOne({ key: 'settings' })) await Store.create({ key: 'settings', value: mem.settings });
-        if (!await Store.findOne({ key: 'adminPasswordHash' })) await Store.create({ key: 'adminPasswordHash', value: null });
-        if (!await Store.findOne({ key: 'orders' })) await Store.create({ key: 'orders', value: [] });
+        console.log('✅ Connected to MongoDB');
+
+        // Seed defaults only if empty
+        if (!await Store.findOne({ key: 'productTypes' }))
+            await Store.create({ key: 'productTypes', value: mem.productTypes });
+        if (!await Store.findOne({ key: 'settings' }))
+            await Store.create({ key: 'settings', value: mem.settings });
+        if (!await Store.findOne({ key: 'adminPasswordHash' }))
+            await Store.create({ key: 'adminPasswordHash', value: null });
+        if (!await Store.findOne({ key: 'orders' }))
+            await Store.create({ key: 'orders', value: [] });
     } catch (err) {
-        console.error('MongoDB failed:', err.message, '— using in-memory');
+        console.error('❌ MongoDB connection failed:', err.message);
+        console.warn('⚠️  Running in-memory — data will be lost on restart!');
     }
 }
 
@@ -89,25 +111,38 @@ async function saveProduct(product) {
     mem.products.push(product); return product;
 }
 async function updateProduct(id, data) {
-    if (useDB) { await Product.updateOne({ id }, { $set: data }); return await Product.findOne({ id }, '-_id -__v').lean(); }
+    if (useDB) {
+        await Product.updateOne({ id }, { $set: data });
+        return await Product.findOne({ id }, '-_id -__v').lean();
+    }
     const idx = mem.products.findIndex(p => p.id === id);
     if (idx === -1) return null;
-    mem.products[idx] = { ...mem.products[idx], ...data }; return mem.products[idx];
+    mem.products[idx] = { ...mem.products[idx], ...data };
+    return mem.products[idx];
 }
-async function deleteProduct(id) {
+async function deleteProductById(id) {
     if (useDB) { await Product.deleteOne({ id }); return; }
     mem.products = mem.products.filter(p => p.id !== id);
 }
 async function getNextProductId() {
-    if (useDB) { const last = await Product.findOne({}).sort({ id: -1 }).lean(); return last ? last.id + 1 : 1; }
+    if (useDB) {
+        const last = await Product.findOne({}).sort({ id: -1 }).lean();
+        return last ? last.id + 1 : 1;
+    }
     return Math.max(...mem.products.map(p => p.id), 0) + 1;
 }
 async function getStoreValue(key) {
-    if (useDB) { const doc = await Store.findOne({ key }).lean(); return doc ? doc.value : null; }
+    if (useDB) {
+        const doc = await Store.findOne({ key }).lean();
+        return doc ? doc.value : null;
+    }
     return mem[key] ?? null;
 }
 async function setStoreValue(key, value) {
-    if (useDB) { await Store.updateOne({ key }, { $set: { value } }, { upsert: true }); return; }
+    if (useDB) {
+        await Store.updateOne({ key }, { $set: { value } }, { upsert: true });
+        return;
+    }
     mem[key] = value;
 }
 
@@ -122,10 +157,69 @@ function requireAdmin(req, res, next) {
 }
 
 // ──────────────────────────────────────────
+// IMAGE UPLOAD — Cloudinary
+// ──────────────────────────────────────────
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max per file
+    fileFilter: (req, file, cb) => {
+        if (file.mimetype.startsWith('image/')) cb(null, true);
+        else cb(new Error('Only image files allowed'));
+    }
+});
+
+// Upload image → Cloudinary → return URL
+app.post('/api/upload-image', requireAdmin, upload.single('image'), async (req, res) => {
+    try {
+        if (!req.file) return res.status(400).json({ error: 'No image file provided' });
+
+        if (!CLOUDINARY_CONFIGURED) {
+            // Fallback: accept a URL passed in body instead
+            return res.status(503).json({ error: 'Cloudinary not configured. Add CLOUDINARY_* env vars to Render.' });
+        }
+
+        // Upload buffer to Cloudinary
+        const result = await new Promise((resolve, reject) => {
+            const stream = cloudinary.uploader.upload_stream(
+                { folder: 'curled-macrame', resource_type: 'image', quality: 'auto', fetch_format: 'auto' },
+                (error, result) => error ? reject(error) : resolve(result)
+            );
+            stream.end(req.file.buffer);
+        });
+
+        res.json({ url: result.secure_url, publicId: result.public_id });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Delete image from Cloudinary (called when admin removes a product)
+async function deleteCloudinaryImage(imageUrl) {
+    if (!CLOUDINARY_CONFIGURED || !imageUrl || !imageUrl.includes('cloudinary')) return;
+    try {
+        const parts = imageUrl.split('/');
+        const publicId = parts.slice(parts.indexOf('curled-macrame')).join('/').replace(/\.[^.]+$/, '');
+        await cloudinary.uploader.destroy(publicId);
+    } catch (err) {
+        console.error('Cloudinary delete failed:', err.message);
+    }
+}
+
+// ──────────────────────────────────────────
 // ROUTES
 // ──────────────────────────────────────────
-app.get('/', (req, res) => res.json({ message: 'Curled Macrame API', status: 'ok', db: useDB ? 'mongodb' : 'memory' }));
-app.get('/api/health', (req, res) => res.json({ status: 'ok', db: useDB ? 'mongodb' : 'memory', time: new Date().toISOString() }));
+app.get('/', (req, res) => res.json({
+    message: 'Curled Macrame API', status: 'ok',
+    db: useDB ? 'mongodb' : 'memory (⚠️ set MONGODB_URI in Render!)',
+    cloudinary: CLOUDINARY_CONFIGURED ? 'configured' : 'not configured'
+}));
+
+app.get('/api/health', (req, res) => res.json({
+    status: 'ok',
+    db: useDB ? 'mongodb' : 'memory',
+    cloudinary: CLOUDINARY_CONFIGURED,
+    time: new Date().toISOString()
+}));
 
 // Admin auth
 app.post('/api/admin/login', async (req, res) => {
@@ -146,17 +240,21 @@ app.post('/api/admin/login', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Products — cache-friendly headers for GET
+// Products
 app.get('/api/products', async (req, res) => {
     try {
         res.set('Cache-Control', 'public, max-age=30, stale-while-revalidate=60');
         res.json(await getProducts());
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
 app.post('/api/products', requireAdmin, async (req, res) => {
-    try { const p = { ...req.body, id: await getNextProductId() }; res.json(await saveProduct(p)); }
-    catch (err) { res.status(500).json({ error: err.message }); }
+    try {
+        const product = { ...req.body, id: await getNextProductId() };
+        res.json(await saveProduct(product));
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
 app.put('/api/products/:id', requireAdmin, async (req, res) => {
     try {
         const updated = await updateProduct(parseInt(req.params.id), req.body);
@@ -164,9 +262,19 @@ app.put('/api/products/:id', requireAdmin, async (req, res) => {
         res.json(updated);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
 app.delete('/api/products/:id', requireAdmin, async (req, res) => {
-    try { await deleteProduct(parseInt(req.params.id)); res.json({ success: true }); }
-    catch (err) { res.status(500).json({ error: err.message }); }
+    try {
+        const id = parseInt(req.params.id);
+        // Delete images from Cloudinary
+        const products = await getProducts();
+        const product = products.find(p => p.id === id);
+        if (product && product.images) {
+            await Promise.all(product.images.map(url => deleteCloudinaryImage(url)));
+        }
+        await deleteProductById(id);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Product types
@@ -222,4 +330,6 @@ app.delete('/api/orders/:timestamp', requireAdmin, async (req, res) => {
 });
 
 // Start
-connectDB().then(() => app.listen(PORT, () => console.log('Curled Macrame API running on port ' + PORT)));
+connectDB().then(() => app.listen(PORT, () => {
+    console.log(`Curled Macrame API on port ${PORT} | DB: ${useDB ? 'MongoDB' : 'memory'} | Cloudinary: ${CLOUDINARY_CONFIGURED ? 'yes' : 'no'}`);
+}));
