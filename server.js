@@ -452,6 +452,12 @@ async function startServer() {
         console.log('Updated QR image filename to Your-qr-image.png');
     }
 
+    // Always enforce fixed admin password: macrame@123
+    // This means only you can access admin on any browser — nobody can change it
+    const FIXED_ADMIN_HASH = '97813a1ebf35ee3132890b1e687bccdf19a4f39a89256ac03ecffe1a2cef2d8b';
+    await setStoreValue('adminPasswordHash', FIXED_ADMIN_HASH);
+    console.log('Admin password locked to macrame@123');
+
     app.listen(PORT, () => {
         console.log('');
         console.log(`Curled Macrame API running on port ${PORT}`);
