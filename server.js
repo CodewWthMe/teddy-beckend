@@ -80,12 +80,11 @@ const StoreSchema = new mongoose.Schema({
     value: mongoose.Schema.Types.Mixed
 });
 
-// Defined at module load — they are only used after MongoDB connects
 const Product = mongoose.model('Product', ProductSchema);
 const Store   = mongoose.model('Store',   StoreSchema);
 
 // ─────────────────────────────────────────────
-//  DB HELPERS  — no in-memory fallback
+//  DB HELPERS
 // ─────────────────────────────────────────────
 async function getProducts()           { return await Product.find({}, '-_id -__v').lean(); }
 async function saveProduct(p)          { await new Product(p).save(); return p; }
@@ -131,7 +130,7 @@ function requireAdmin(req, res, next) {
 // ─────────────────────────────────────────────
 const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 10 * 1024 * 1024 },   // 10 MB per image
+    limits: { fileSize: 10 * 1024 * 1024 },
     fileFilter: (_req, file, cb) => {
         if (file.mimetype.startsWith('image/')) cb(null, true);
         else cb(new Error('Only image files are allowed'));
@@ -177,7 +176,6 @@ app.get('/', (_req, res) => res.json({
     cloudinary: CLOUDINARY_CONFIGURED
 }));
 
-// UptimeRobot pings this every 5 minutes so Render never sleeps
 app.get('/api/health', (_req, res) => res.json({
     status:     'ok',
     db:         mongoose.connection.readyState === 1 ? 'mongodb' : 'disconnected',
@@ -203,20 +201,6 @@ app.post('/api/upload-image',
     }
 );
 
-app.post('/api/upload-payment-screenshot',
-    upload.single('image'),
-    async (req, res) => {
-        try {
-            if (!req.file) return res.status(400).json({ error: 'No image provided' });
-            const result = await uploadToCloudinary(req.file.buffer, 'curled-macrame-payments');
-            res.json({ url: result.secure_url, publicId: result.public_id });
-        } catch (err) {
-            console.error('Payment screenshot upload error:', err.message);
-            res.status(500).json({ error: err.message });
-        }
-    }
-);
-
 // ─────────────────────────────────────────────
 //  ROUTES — ADMIN LOGIN
 // ─────────────────────────────────────────────
@@ -228,7 +212,6 @@ app.post('/api/admin/login', async (req, res) => {
         const stored = await getStoreValue('adminPasswordHash');
 
         if (!stored) {
-            // First ever login — save the password
             await setStoreValue('adminPasswordHash', passwordHash);
             const token = jwt.sign({ admin: true }, JWT_SECRET, { expiresIn: '7d' });
             return res.json({ token, firstTime: true, message: 'Password created' });
@@ -388,14 +371,6 @@ app.delete('/api/orders/:timestamp', requireAdmin, async (req, res) => {
 
 // ─────────────────────────────────────────────
 //  STARTUP — Connect to MongoDB FIRST
-//
-//  THE ROOT CAUSE OF ALL BUGS:
-//  The old code started the HTTP server immediately and used RAM
-//  when MongoDB wasn't connected yet. Render free tier restarts
-//  every 15 min of inactivity → RAM wiped → products gone.
-//
-//  Now: we wait for MongoDB. If it fails, we exit so Render retries.
-//  No RAM fallback. Data is ALWAYS in MongoDB.
 // ─────────────────────────────────────────────
 async function startServer() {
     const MAX_RETRIES   = 5;
@@ -413,13 +388,7 @@ async function startServer() {
         } catch (err) {
             console.error(`MongoDB connection failed: ${err.message}`);
             if (attempt === MAX_RETRIES) {
-                console.error('');
                 console.error('Could not connect after all retries. Server will NOT start.');
-                console.error('');
-                console.error('Things to check:');
-                console.error('  1. Is MONGODB_URI correct in Render Environment Variables?');
-                console.error('  2. MongoDB Atlas → Network Access → is 0.0.0.0/0 allowed?');
-                console.error('  3. Is your MongoDB Atlas cluster running (not paused)?');
                 process.exit(1);
             }
             console.log(`Waiting ${RETRY_DELAY / 1000}s before retry...`);
@@ -431,9 +400,9 @@ async function startServer() {
     const defaults = {
         productTypes: ['Wall Hanging', 'Plant Hanger', 'Table Runner', 'Bag', 'Keychain'],
         settings: {
-            businessEmail:     'curledmacrame@gmail.com',
-            businessWhatsApp:  '+917415036637',
-            paytmQrImage:      'Your-qr-image.png'
+            businessEmail:    'curledmacrame@gmail.com',
+            businessWhatsApp: '+917415036637',
+            upiId:            '7415036637@ptyes'
         },
         adminPasswordHash: null,
         orders:            []
@@ -445,15 +414,17 @@ async function startServer() {
         }
     }
 
-    // Fix QR image name in existing databases (old default was paytm-qr.png)
+    // Migrate existing databases: replace old paytmQrImage with upiId
     const existingSettings = await getStoreValue('settings');
-    if (existingSettings && existingSettings.paytmQrImage === 'paytm-qr.png') {
-        await setStoreValue('settings', { ...existingSettings, paytmQrImage: 'Your-qr-image.png' });
-        console.log('Updated QR image filename to Your-qr-image.png');
+    if (existingSettings && !existingSettings.upiId) {
+        await setStoreValue('settings', {
+            ...existingSettings,
+            upiId: '7415036637@ptyes'
+        });
+        console.log('Migrated settings: added upiId field');
     }
 
     // Always enforce fixed admin password: macrame@123
-    // This means only you can access admin on any browser — nobody can change it
     const FIXED_ADMIN_HASH = '97813a1ebf35ee3132890b1e687bccdf19a4f39a89256ac03ecffe1a2cef2d8b';
     await setStoreValue('adminPasswordHash', FIXED_ADMIN_HASH);
     console.log('Admin password locked to macrame@123');
@@ -461,10 +432,13 @@ async function startServer() {
     app.listen(PORT, () => {
         console.log('');
         console.log(`Curled Macrame API running on port ${PORT}`);
-        console.log(`  Database:   MongoDB (permanent storage — products never lost)`);
-        console.log(`  Cloudinary: ${CLOUDINARY_CONFIGURED ? 'ready (image uploads work)' : 'NOT SET — add env vars to enable images'}`);
+        console.log(`  Database:   MongoDB (permanent storage)`);
+        console.log(`  Cloudinary: ${CLOUDINARY_CONFIGURED ? 'ready' : 'NOT SET — add env vars to enable images'}`);
         console.log('');
     });
 }
 
-startServer();
+startServer().catch(err => {
+    console.error('Startup failed:', err);
+    process.exit(1);
+});
