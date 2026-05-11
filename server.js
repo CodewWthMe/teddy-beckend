@@ -69,7 +69,7 @@ const ProductSchema = new mongoose.Schema({
     price:       { type: Number, required: true },
     discount:    { type: Number, default: 0 },
     type:        String,
-    featured:    { type: Boolean, default: true },
+    featured:    { type: Boolean, default: false },
     stock:       { type: Number, default: 99 },
     images:      [String],
     video:       { type: String, default: null }
